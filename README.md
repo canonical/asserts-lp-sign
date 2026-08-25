@@ -31,9 +31,6 @@ requires Go ≥ 1.25 — toolchains ≥ 1.21 fetch that automatically
     make lint     # gofmt, go vet, staticcheck
     make fmt-fix  # auto-format
 
-No Launchpad access required: the repository is self-contained (no `commons/`
-clone), so external contributors can build and test it directly.
-
 ## License
 
 GNU General Public License v3 — see `LICENSE`. Copyright (C) 2026 Canonical Ltd.

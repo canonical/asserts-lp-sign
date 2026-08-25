@@ -1,11 +1,5 @@
-# Inlined from snapstore-commons Makefile.variables — the only two variables
-# this Makefile consumes: TMPDIR and V.
-TMPDIR = $(CURDIR)/tmp
-V?=1
-
-BASEDIR=${CURDIR}
-TMP=${TMPDIR}
-GOBIN=${TMPDIR}/bin
+TMP=$(CURDIR)/tmp
+GOBIN=${TMP}/bin
 
 # Binaries: prefer whatever go/gofmt is on PATH (GitHub-hosted runners,
 # contributor laptops); fall back to the Go snap used by the team's

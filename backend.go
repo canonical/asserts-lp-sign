@@ -17,7 +17,7 @@
  *
  */
 
-package lpsigning
+package assertslpsign
 
 import (
 	"bytes"
@@ -34,7 +34,9 @@ import (
 	"sync"
 
 	"golang.org/x/crypto/nacl/box"
+	//lint:ignore SA1019 openpgp interop is required to talk to lp-signing; snapd itself uses this package
 	"golang.org/x/crypto/openpgp/armor"
+	//lint:ignore SA1019 openpgp interop is required to talk to lp-signing; snapd itself uses this package
 	"golang.org/x/crypto/openpgp/packet"
 
 	"github.com/snapcore/snapd/asserts"

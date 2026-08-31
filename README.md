@@ -29,7 +29,7 @@ requires Go ≥ 1.25 — toolchains ≥ 1.21 fetch that automatically
 
     make test     # lint + run the test suite (gocheck)
     make lint     # gofmt, go vet, staticcheck
-    make fmt-fix  # auto-format
+    make fmt      # auto-format
 
 ## License
 

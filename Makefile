@@ -45,16 +45,16 @@ _test: |${TMP}
 vet:
 	${GO} vet $(PACKAGES)
 
-.PHONY: fmt fmt-fix
-fmt:
-	@test -z "`${GOFMT} -l $$(git ls-files '*.go')`" || { ${GOFMT} -d $$(git ls-files '*.go'); echo "ERROR: gofmt found the above formatting errors, please correct"; exit 1; }
+.PHONY: fmt fmt-check
+fmt-check:
+	@test -z "`${GOFMT} -l -s $$(git ls-files '*.go')`" || { ${GOFMT} -d -s $$(git ls-files '*.go'); echo "ERROR: gofmt found the above formatting errors, please correct"; exit 1; }
 
-fmt-fix:
+fmt:
 	@echo "Formatting and simplifying files..."
 	@${GOFMT} -l -s -w $$(git ls-files '*.go')
 
 .PHONY: lint
-lint:: ${GOBIN} fmt vet
+lint:: ${GOBIN} fmt-check vet
 	${STATICCHECK} $(PACKAGES)
 
 ${TMP}:

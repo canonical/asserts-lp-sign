@@ -1,6 +1,6 @@
-module github.com/pedronis/lpsigning
+module github.com/canonical/asserts-lp-sign
 
-go 1.18
+go 1.20
 
 require (
 	github.com/snapcore/snapd v0.0.0-20260622141614-e04020157e05

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pedronis/lpsigning"
+	"github.com/canonical/asserts-lp-sign"
 	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/asserts/systestkeys"
 )
@@ -39,10 +39,10 @@ func run() error {
 		return fmt.Errorf("internal error: unexpected store account-key assertion type %T", systestkeys.TestStoreAccountKey)
 	}
 
-	backend, err := lpsigning.NewKeypairMgrBackend(lpsigning.Config{
+	backend, err := assertslpsign.NewKeypairMgrBackend(assertslpsign.Config{
 		BaseURL:          lpSigningBaseURL,
 		ClientPrivateKey: clientPrivateKey,
-		Keys: []lpsigning.KeyConfig{{
+		Keys: []assertslpsign.KeyConfig{{
 			AccountKey:  accountKey,
 			Fingerprint: lpSigningFingerprint,
 		}},

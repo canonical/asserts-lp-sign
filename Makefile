@@ -14,7 +14,7 @@ default: test
 
 # Install required dev tools.
 $(GOBIN):
-	GOBIN=$(GOBIN) $(GO) install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+	GOBIN=$(GOBIN) $(GO) install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 	touch $@
 
 .PHONY: test

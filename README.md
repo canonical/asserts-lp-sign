@@ -23,9 +23,8 @@ See `cmd/lpsigndemo` for a complete example wiring `NewKeypairMgrBackend` into
 Requires a Go toolchain (≥ 1.20) on PATH, or the Go snap at `/snap/bin/go` — the
 Makefile autodetects both; override with `make GO=<path>` if needed. Go ≥ 1.20
 builds and tests the library (`go build ./...`, `go test ./...`); `make lint`
-and `make test` additionally install the pinned staticcheck v0.7.0, whose build
-requires Go ≥ 1.25 — toolchains ≥ 1.21 fetch that automatically
-(`GOTOOLCHAIN=auto` is the default).
+and `make test` additionally install the pinned staticcheck, whose build
+requires Go ≥ 1.26 — toolchains ≥ 1.21 fetch that automatically
 
     make test     # lint + run the test suite (gocheck)
     make lint     # gofmt, go vet, staticcheck

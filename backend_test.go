@@ -301,6 +301,57 @@ func (s *backendSuite) TestConstructorRejectsMissingAccountKey(c *check.C) {
 	c.Assert(err, check.ErrorMatches, `cannot create lp-signing backend: missing account-key assertion`)
 }
 
+func (s *backendSuite) TestConstructorDefaultHTTPClient(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	c.Assert(backend.httpClient, check.NotNil)
+	c.Check(backend.httpClient.Timeout, check.Equals, 30*time.Second)
+	// The backend must be isolated from the shared global default client.
+	c.Check(backend.httpClient == http.DefaultClient, check.Equals, false)
+}
+
+func (s *backendSuite) TestSignHonoursConfiguredHTTPClientTimeout(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	// A service that stalls every request well past the injected client
+	// timeout below.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(250 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+		HTTPClient: &http.Client{Timeout: 50 * time.Millisecond},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR0", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot fetch lp-signing service key: Get "http://.*/service-key": context deadline exceeded.*`)
+}
+
 func (s *backendSuite) TestSignDearmorsDetachedSignature(c *check.C) {
 	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
 	accountKey := makeAccountKey(c, privKey.PublicKey())

@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/nacl/box"
 	//lint:ignore SA1019 openpgp interop is required to talk to lp-signing; snapd itself uses this package
@@ -53,6 +54,10 @@ type Config struct {
 	BaseURL          string
 	ClientPrivateKey string
 	Keys             []KeyConfig
+
+	// HTTPClient is the HTTP client used to talk to lp-signing. If nil,
+	// a client with a 30 second timeout is used.
+	HTTPClient *http.Client
 }
 
 // KeyConfig maps one account-key assertion to the Launchpad fingerprint used for signing.
@@ -129,9 +134,14 @@ func NewKeypairMgrBackend(cfg Config) (*KeypairMgrBackend, error) {
 		loadedKeysByHandle[loadedKey.KeyHandle] = loadedKey
 	}
 
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
 	return &KeypairMgrBackend{
 		baseURL:            baseURL,
-		httpClient:         http.DefaultClient,
+		httpClient:         httpClient,
 		clientPublicKey:    clientPublicKey,
 		clientPrivateKey:   clientPrivateKey,
 		loadedKeysByID:     loadedKeysByID,

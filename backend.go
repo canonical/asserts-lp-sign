@@ -337,6 +337,24 @@ func (b *KeypairMgrBackend) boxedPost(path string, payload any) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("cannot read lp-signing %s response: %v", path, err)
 	}
+	plaintextResponse, err := unboxResponse(path, encryptedResponse, responseNonce, serviceSharedKey)
+	if err != nil {
+		if response.StatusCode >= 400 {
+			snippet := encryptedResponse
+			if len(snippet) > 256 {
+				snippet = append(snippet[:256:256], '.', '.', '.')
+			}
+			return nil, fmt.Errorf("cannot call lp-signing %s: unexpected status %d, unboxed response body: %q", path, response.StatusCode, snippet)
+		}
+		return nil, err
+	}
+	if response.StatusCode >= 400 {
+		return nil, decodeAPIError(path, plaintextResponse, response.StatusCode)
+	}
+	return plaintextResponse, nil
+}
+
+func unboxResponse(path string, encryptedResponse []byte, responseNonce *[24]byte, serviceSharedKey *[32]byte) ([]byte, error) {
 	boxedResponse, err := base64.StdEncoding.DecodeString(string(encryptedResponse))
 	if err != nil {
 		return nil, fmt.Errorf("cannot decode lp-signing %s response: %v", path, err)
@@ -344,9 +362,6 @@ func (b *KeypairMgrBackend) boxedPost(path string, payload any) ([]byte, error) 
 	plaintextResponse, ok := openBox(boxedResponse, responseNonce, serviceSharedKey)
 	if !ok {
 		return nil, fmt.Errorf("cannot decrypt lp-signing %s response", path)
-	}
-	if response.StatusCode >= 400 {
-		return nil, decodeAPIError(path, plaintextResponse, response.StatusCode)
 	}
 	return plaintextResponse, nil
 }

@@ -29,6 +29,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,11 @@ type mockSigningService struct {
 	omitPublicKey           bool
 	errorMessage            string
 	nonceValue              [24]byte
+
+	// When set, handleSign responds with this raw (non-boxed) status and
+	// body, as a proxy or an unhandled server error would.
+	rawSignStatus int
+	rawSignBody   []byte
 }
 
 func newMockSigningService(c *check.C, armoredSignature []byte, responsePublicKey []byte) *mockSigningService {
@@ -99,6 +105,13 @@ func (s *mockSigningService) handler() http.Handler {
 }
 
 func (s *mockSigningService) handleSign(w http.ResponseWriter, r *http.Request) {
+	if s.rawSignStatus != 0 {
+		// Respond with a raw (non-boxed) status and body, as a proxy or
+		// an unhandled server error would.
+		w.WriteHeader(s.rawSignStatus)
+		_, _ = w.Write(s.rawSignBody)
+		return
+	}
 	clientPublicKey, requestNonce, responseNonce, ciphertext := decodeBoxedRequest(r)
 	plaintext, ok := box.Open(nil, ciphertext, requestNonce, clientPublicKey, s.servicePrivateKey)
 	if !ok {
@@ -693,4 +706,75 @@ func (s *backendSuite) TestLoadByCanonicalFingerprintMissingKey(c *check.C) {
 
 	_, err = backend.LoadByCanonicalFingerprint("MISSING")
 	c.Assert(err, check.ErrorMatches, `missing key`)
+}
+
+func (s *backendSuite) TestSignReportsNonBoxedErrorResponses(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	// A proxy in front of lp-signing returning a plain error page.
+	service.rawSignStatus = http.StatusBadGateway
+	service.rawSignBody = []byte("502 Bad Gateway")
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot call lp-signing /sign: unexpected status 502, unboxed response body: "502 Bad Gateway"`)
+
+	// Long non-boxed bodies are truncated to 256 bytes, with a trailing
+	// ellipsis marking the truncation.
+	service.rawSignBody = bytes.Repeat([]byte("x"), 300)
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, fmt.Sprintf(`cannot call lp-signing /sign: unexpected status 502, unboxed response body: %q`, string(bytes.Repeat([]byte("x"), 256))+"..."))
+}
+
+func (s *backendSuite) TestSignRejectsGarbageSuccessResponses(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	// A 200 whose body is valid base64 but not a box we can open.
+	service.rawSignStatus = http.StatusOK
+	service.rawSignBody = []byte(base64.StdEncoding.EncodeToString([]byte("this is not a boxed response")))
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decrypt lp-signing /sign response`)
+
+	// A 200 whose body is not even valid base64 keeps the decode error.
+	service.rawSignBody = []byte("this is not base64 !!!")
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing /sign response: .*`)
 }

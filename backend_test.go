@@ -29,10 +29,12 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -705,7 +707,8 @@ func (s *backendSuite) TestLoadByCanonicalFingerprintMissingKey(c *check.C) {
 	c.Assert(err, check.IsNil)
 
 	_, err = backend.LoadByCanonicalFingerprint("MISSING")
-	c.Assert(err, check.ErrorMatches, `missing key`)
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": lp-signing: key not found`)
+	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
 }
 
 func (s *backendSuite) TestSignReportsNonBoxedErrorResponses(c *check.C) {
@@ -777,4 +780,59 @@ func (s *backendSuite) TestSignRejectsGarbageSuccessResponses(c *check.C) {
 	service.rawSignBody = []byte("this is not base64 !!!")
 	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
 	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing /sign response: .*`)
+}
+
+func (s *backendSuite) TestKeyNotFoundErrors(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.LoadByID("MISSING-KEY-ID")
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with id "MISSING-KEY-ID": lp-signing: key not found`)
+	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
+
+	_, err = backend.LoadByCanonicalFingerprint("MISSING")
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": lp-signing: key not found`)
+	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
+
+	_, err = backend.Sign("MISSING", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot sign with lp-signing: no configured key with fingerprint "MISSING": lp-signing: key not found`)
+	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
+}
+
+func (s *backendSuite) TestTransportErrorsWrapCause(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR0", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot fetch lp-signing service key: Get "http://.*/service-key": .*`)
+	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, false)
+	var urlErr *url.Error
+	c.Check(errors.As(err, &urlErr), check.Equals, true)
 }

@@ -71,6 +71,16 @@ type mockSigningService struct {
 	// body, as a proxy or an unhandled server error would.
 	rawSignStatus int
 	rawSignBody   []byte
+
+	// Failure injection: when set, /service-key and /nonce respond with
+	// these status (0 means the default 200/201) and raw body instead of
+	// their well-formed responses; errorResponseBody is boxed verbatim
+	// with a 400 by handleSign, for malformed error_list responses.
+	serviceKeyStatus  int
+	serviceKeyBody    string
+	nonceStatus       int
+	nonceBody         string
+	errorResponseBody string
 }
 
 func newMockSigningService(c *check.C, armoredSignature []byte, responsePublicKey []byte) *mockSigningService {
@@ -90,10 +100,28 @@ func (s *mockSigningService) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/service-key":
+			if s.serviceKeyStatus != 0 || s.serviceKeyBody != "" {
+				status := s.serviceKeyStatus
+				if status == 0 {
+					status = http.StatusOK
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(s.serviceKeyBody))
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"service-key": base64.StdEncoding.EncodeToString(s.servicePublicKey[:]),
 			})
 		case "/nonce":
+			if s.nonceStatus != 0 || s.nonceBody != "" {
+				status := s.nonceStatus
+				if status == 0 {
+					status = http.StatusCreated
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(s.nonceBody))
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"nonce": base64.StdEncoding.EncodeToString(s.nonceValue[:]),
@@ -130,11 +158,15 @@ func (s *mockSigningService) handleSign(w http.ResponseWriter, r *http.Request) 
 
 	status := http.StatusOK
 	var responseBody []byte
-	if s.errorMessage != "" {
+	if s.errorMessage != "" || s.errorResponseBody != "" {
 		status = http.StatusBadRequest
-		responseBody, _ = json.Marshal(map[string]any{
-			"error_list": []map[string]string{{"message": s.errorMessage}},
-		})
+		if s.errorResponseBody != "" {
+			responseBody = []byte(s.errorResponseBody)
+		} else {
+			responseBody, _ = json.Marshal(map[string]any{
+				"error_list": []map[string]string{{"message": s.errorMessage}},
+			})
+		}
 	} else {
 		armoredSignature := s.armoredSignature
 		if s.signingKey != nil {
@@ -835,4 +867,315 @@ func (s *backendSuite) TestTransportErrorsWrapCause(c *check.C) {
 	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, false)
 	var urlErr *url.Error
 	c.Check(errors.As(err, &urlErr), check.Equals, true)
+}
+
+func (s *backendSuite) TestConstructorRejectsInvalidBaseURL(c *check.C) {
+	for _, tc := range []struct{ baseURL, expected string }{
+		{"", `cannot create lp-signing backend: missing base URL`},
+		{"://x", `cannot create lp-signing backend: invalid base URL: .*`},
+		{"example.com", `cannot create lp-signing backend: invalid base URL "example.com"`},
+	} {
+		_, err := NewKeypairMgrBackend(Config{
+			BaseURL: tc.baseURL,
+		})
+		c.Assert(err, check.ErrorMatches, tc.expected, check.Commentf("base URL %q", tc.baseURL))
+	}
+}
+
+func (s *backendSuite) TestConstructorNormalizesBaseURL(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com/",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+	c.Check(backend.baseURL, check.Equals, "http://example.com")
+}
+
+func (s *backendSuite) TestConstructorRejectsInvalidClientKey(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	for _, tc := range []struct{ clientKey, expected string }{
+		{"", `cannot create lp-signing backend: missing client private key`},
+		{"not base64!", `cannot create lp-signing backend: cannot decode client private key: .*`},
+		{base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 16)), `cannot create lp-signing backend: client private key must be 32 bytes, got 16`},
+	} {
+		_, err := NewKeypairMgrBackend(Config{
+			BaseURL:          "http://example.com",
+			ClientPrivateKey: tc.clientKey,
+			Keys: []KeyConfig{{
+				AccountKey:  accountKey,
+				Fingerprint: "LPFPR0",
+			}},
+		})
+		c.Assert(err, check.ErrorMatches, tc.expected, check.Commentf("client key %q", tc.clientKey))
+	}
+}
+
+func (s *backendSuite) TestConstructorRejectsNoSigningKeys(c *check.C) {
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	_, err = NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+	})
+	c.Assert(err, check.ErrorMatches, `cannot create lp-signing backend: no signing keys configured`)
+}
+
+func (s *backendSuite) TestConstructorRejectsMissingFingerprint(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	_, err = NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey: makeAccountKey(c, privKey.PublicKey()),
+		}},
+	})
+	c.Assert(err, check.ErrorMatches, `cannot create lp-signing backend: missing fingerprint for account-key ".*"`)
+}
+
+func (s *backendSuite) TestConstructorRejectsDuplicateKeyID(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	_, err = NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{
+			{AccountKey: accountKey, Fingerprint: "LPFPR1"},
+			{AccountKey: accountKey, Fingerprint: "LPFPR2"},
+		},
+	})
+	c.Assert(err, check.ErrorMatches, `cannot create lp-signing backend: duplicate key id ".*"`)
+}
+
+func (s *backendSuite) TestConstructorRejectsDuplicateFingerprint(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	c.Assert(err, check.IsNil)
+	otherAccountKey := makeAccountKey(c, asserts.RSAPublicKey(&otherKey.PublicKey))
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	_, err = NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{
+			{AccountKey: accountKey, Fingerprint: "LPFPR0"},
+			{AccountKey: otherAccountKey, Fingerprint: "LPFPR0"},
+		},
+	})
+	c.Assert(err, check.ErrorMatches, `cannot create lp-signing backend: duplicate fingerprint "LPFPR0"`)
+}
+
+func (s *backendSuite) TestRSAPKCSSignUnsupported(c *check.C) {
+	privKey, _ := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          "http://example.com",
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR0",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.RSAPKCSSign("LPFPR0", []byte("prepared"))
+	c.Assert(err, check.ErrorMatches, `internal error: lp-signing backend does not support RSA-PKCS signing`)
+}
+
+func (s *backendSuite) TestSignPropagatesBoxedAPIError(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	service.errorMessage = "unknown fingerprint LPFPR1"
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot call lp-signing /sign: unknown fingerprint LPFPR1`)
+}
+
+func (s *backendSuite) TestSignReportsUnexpectedStatusForBadErrorList(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	// A boxed 400 whose error_list is empty.
+	service.errorResponseBody = `{"error_list":[]}`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot call lp-signing /sign: unexpected status 400`)
+
+	// A boxed 400 that is not even JSON.
+	service.errorResponseBody = `not json`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot call lp-signing /sign: unexpected status 400`)
+}
+
+func (s *backendSuite) TestSignRejectsBadServiceKey(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	service.serviceKeyStatus = http.StatusInternalServerError
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot fetch lp-signing service key: unexpected status 500`)
+
+	service.serviceKeyStatus = 0
+	service.serviceKeyBody = "not json"
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing service key response: .*`)
+
+	service.serviceKeyBody = `{"service-key":"!!!not base64!!!"}`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing service key: .*`)
+
+	service.serviceKeyBody = `{"service-key":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 16)) + `"}`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing service key: expected 32 bytes, got 16`)
+}
+
+func (s *backendSuite) TestSignRejectsBadNonce(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armored, _ := makeArmoredDetachedSignature(c, rsaPrivKey, []byte("content to sign"))
+	responsePublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	service := newMockSigningService(c, armored, responsePublicKey)
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	service.nonceStatus = http.StatusInternalServerError
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot fetch lp-signing nonce: unexpected status 500`)
+
+	service.nonceStatus = 0
+	service.nonceBody = "not json"
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing nonce response: .*`)
+
+	service.nonceBody = `{"nonce":"!!!not base64!!!"}`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing nonce: .*`)
+
+	service.nonceBody = `{"nonce":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 8)) + `"}`
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing nonce: expected 24 bytes, got 8`)
+}
+
+func (s *backendSuite) TestSignRejectsBadArmoredSignature(c *check.C) {
+	privKey, rsaPrivKey := assertstest.ReadPrivKey(assertstest.DevKey)
+	accountKey := makeAccountKey(c, privKey.PublicKey())
+	armoredPublicKey, err := makeArmoredOpenPGPRSAPublicKeyBytes(&rsaPrivKey.PublicKey)
+	c.Assert(err, check.IsNil)
+	// An armored public key where the signature belongs: a valid armor
+	// block, but of the wrong type.
+	service := newMockSigningService(c, armoredPublicKey, armoredPublicKey)
+	server := httptest.NewServer(service.handler())
+	defer server.Close()
+
+	_, clientPrivateKey, err := generateX25519Keypair(rand.Reader)
+	c.Assert(err, check.IsNil)
+
+	backend, err := NewKeypairMgrBackend(Config{
+		BaseURL:          server.URL,
+		ClientPrivateKey: base64.StdEncoding.EncodeToString(clientPrivateKey[:]),
+		Keys: []KeyConfig{{
+			AccountKey:  accountKey,
+			Fingerprint: "LPFPR1",
+		}},
+	})
+	c.Assert(err, check.IsNil)
+
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing armored signature: unexpected block type "PGP PUBLIC KEY BLOCK"`)
+
+	// Not armor at all.
+	service.armoredSignature = []byte("not an armor block")
+	_, err = backend.Sign("LPFPR1", []byte("content to sign"))
+	c.Assert(err, check.ErrorMatches, `cannot decode lp-signing armored signature: .*`)
 }

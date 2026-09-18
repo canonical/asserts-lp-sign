@@ -52,7 +52,7 @@ const (
 
 // ErrKeyNotFound is returned by LoadByID, LoadByCanonicalFingerprint and
 // Sign when no configured key matches the requested id or handle.
-var ErrKeyNotFound = errors.New("lp-signing: key not found")
+var ErrKeyNotFound = errors.New("key not found")
 
 // Config describes how to connect to the Launchpad signing service.
 type Config struct {

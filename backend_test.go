@@ -739,7 +739,7 @@ func (s *backendSuite) TestLoadByCanonicalFingerprintMissingKey(c *check.C) {
 	c.Assert(err, check.IsNil)
 
 	_, err = backend.LoadByCanonicalFingerprint("MISSING")
-	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": lp-signing: key not found`)
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": key not found`)
 	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
 }
 
@@ -831,15 +831,15 @@ func (s *backendSuite) TestKeyNotFoundErrors(c *check.C) {
 	c.Assert(err, check.IsNil)
 
 	_, err = backend.LoadByID("MISSING-KEY-ID")
-	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with id "MISSING-KEY-ID": lp-signing: key not found`)
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with id "MISSING-KEY-ID": key not found`)
 	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
 
 	_, err = backend.LoadByCanonicalFingerprint("MISSING")
-	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": lp-signing: key not found`)
+	c.Assert(err, check.ErrorMatches, `cannot load lp-signing key with canonical fingerprint "MISSING": key not found`)
 	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
 
 	_, err = backend.Sign("MISSING", []byte("content to sign"))
-	c.Assert(err, check.ErrorMatches, `cannot sign with lp-signing: no configured key with fingerprint "MISSING": lp-signing: key not found`)
+	c.Assert(err, check.ErrorMatches, `cannot sign with lp-signing: no configured key with fingerprint "MISSING": key not found`)
 	c.Check(errors.Is(err, ErrKeyNotFound), check.Equals, true)
 }
 

@@ -26,12 +26,14 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/nacl/box"
 	//lint:ignore SA1019 openpgp interop is required to talk to lp-signing; snapd itself uses this package
@@ -48,11 +50,19 @@ const (
 	lpSigningMessageName    = "(assertion digest)"
 )
 
+// ErrKeyNotFound is returned by LoadByID, LoadByCanonicalFingerprint and
+// Sign when no configured key matches the requested id or handle.
+var ErrKeyNotFound = errors.New("key not found")
+
 // Config describes how to connect to the Launchpad signing service.
 type Config struct {
 	BaseURL          string
 	ClientPrivateKey string
 	Keys             []KeyConfig
+
+	// HTTPClient is the HTTP client used to talk to lp-signing. If nil,
+	// a client with a 30 second timeout is used.
+	HTTPClient *http.Client
 }
 
 // KeyConfig maps one account-key assertion to the Launchpad fingerprint used for signing.
@@ -129,9 +139,14 @@ func NewKeypairMgrBackend(cfg Config) (*KeypairMgrBackend, error) {
 		loadedKeysByHandle[loadedKey.KeyHandle] = loadedKey
 	}
 
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
 	return &KeypairMgrBackend{
 		baseURL:            baseURL,
-		httpClient:         http.DefaultClient,
+		httpClient:         httpClient,
 		clientPublicKey:    clientPublicKey,
 		clientPrivateKey:   clientPrivateKey,
 		loadedKeysByID:     loadedKeysByID,
@@ -146,7 +161,7 @@ func (b *KeypairMgrBackend) CheckFeatures() (asserts.ExtKeypairMgrSigning, error
 func (b *KeypairMgrBackend) LoadByID(keyID string) (*asserts.ExtKeypairMgrLoadedKey, error) {
 	loadedKey := b.loadedKeysByID[keyID]
 	if loadedKey == nil {
-		return nil, &keyNotFoundError{msg: "missing key"}
+		return nil, fmt.Errorf("cannot load lp-signing key with id %q: %w", keyID, ErrKeyNotFound)
 	}
 	return loadedKey, nil
 }
@@ -155,17 +170,9 @@ func (b *KeypairMgrBackend) LoadByID(keyID string) (*asserts.ExtKeypairMgrLoaded
 func (b *KeypairMgrBackend) LoadByCanonicalFingerprint(fingerprint string) (*asserts.ExtKeypairMgrLoadedKey, error) {
 	loadedKey := b.loadedKeysByHandle[fingerprint]
 	if loadedKey == nil {
-		return nil, &keyNotFoundError{msg: "missing key"}
+		return nil, fmt.Errorf("cannot load lp-signing key with canonical fingerprint %q: %w", fingerprint, ErrKeyNotFound)
 	}
 	return loadedKey, nil
-}
-
-type keyNotFoundError struct {
-	msg string
-}
-
-func (e *keyNotFoundError) Error() string {
-	return e.msg
 }
 
 func (b *KeypairMgrBackend) RSAPKCSSign(keyHandle string, prepared []byte) ([]byte, error) {
@@ -175,7 +182,7 @@ func (b *KeypairMgrBackend) RSAPKCSSign(keyHandle string, prepared []byte) ([]by
 func (b *KeypairMgrBackend) Sign(keyHandle string, content []byte) ([]byte, error) {
 	loadedKey := b.loadedKeysByHandle[keyHandle]
 	if loadedKey == nil {
-		return nil, &keyNotFoundError{msg: "missing key"}
+		return nil, fmt.Errorf("cannot sign with lp-signing: no configured key with fingerprint %q: %w", keyHandle, ErrKeyNotFound)
 	}
 
 	signedMessage, decodedPublicKey, err := b.signDetached(loadedKey, content)
@@ -319,14 +326,35 @@ func (b *KeypairMgrBackend) boxedPost(path string, payload any) ([]byte, error) 
 
 	response, err := b.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("cannot call lp-signing %s: %v", path, err)
+		// %w (also below and in getServiceSharedKey/getNonce) so
+		// consumers can classify transport failures, e.g. with
+		// errors.As to *url.Error; other errors are not wrapped.
+		return nil, fmt.Errorf("cannot call lp-signing %s: %w", path, err)
 	}
 	defer response.Body.Close()
 
 	encryptedResponse, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read lp-signing %s response: %v", path, err)
+		return nil, fmt.Errorf("cannot read lp-signing %s response: %w", path, err)
 	}
+	plaintextResponse, err := unboxResponse(path, encryptedResponse, responseNonce, serviceSharedKey)
+	if err != nil {
+		if response.StatusCode >= 400 {
+			snippet := encryptedResponse
+			if len(snippet) > 256 {
+				snippet = append(snippet[:256:256], '.', '.', '.')
+			}
+			return nil, fmt.Errorf("cannot call lp-signing %s: unexpected status %d, unboxed response body: %q", path, response.StatusCode, snippet)
+		}
+		return nil, err
+	}
+	if response.StatusCode >= 400 {
+		return nil, decodeAPIError(path, plaintextResponse, response.StatusCode)
+	}
+	return plaintextResponse, nil
+}
+
+func unboxResponse(path string, encryptedResponse []byte, responseNonce *[24]byte, serviceSharedKey *[32]byte) ([]byte, error) {
 	boxedResponse, err := base64.StdEncoding.DecodeString(string(encryptedResponse))
 	if err != nil {
 		return nil, fmt.Errorf("cannot decode lp-signing %s response: %v", path, err)
@@ -334,9 +362,6 @@ func (b *KeypairMgrBackend) boxedPost(path string, payload any) ([]byte, error) 
 	plaintextResponse, ok := openBox(boxedResponse, responseNonce, serviceSharedKey)
 	if !ok {
 		return nil, fmt.Errorf("cannot decrypt lp-signing %s response", path)
-	}
-	if response.StatusCode >= 400 {
-		return nil, decodeAPIError(path, plaintextResponse, response.StatusCode)
 	}
 	return plaintextResponse, nil
 }
@@ -349,7 +374,7 @@ func (b *KeypairMgrBackend) getServiceSharedKey() (*[32]byte, error) {
 	}
 	response, err := b.httpClient.Get(b.baseURL + "/service-key")
 	if err != nil {
-		return nil, fmt.Errorf("cannot fetch lp-signing service key: %v", err)
+		return nil, fmt.Errorf("cannot fetch lp-signing service key: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -357,7 +382,7 @@ func (b *KeypairMgrBackend) getServiceSharedKey() (*[32]byte, error) {
 	}
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, fmt.Errorf("cannot fetch lp-signing service key: %v", err)
+		return nil, fmt.Errorf("cannot fetch lp-signing service key: %w", err)
 	}
 	var serviceKeyResponse lpSigningServiceKeyResponse
 	if err := json.Unmarshal(responseBody, &serviceKeyResponse); err != nil {
@@ -382,7 +407,7 @@ func (b *KeypairMgrBackend) getServiceSharedKey() (*[32]byte, error) {
 func (b *KeypairMgrBackend) getNonce() (*[24]byte, error) {
 	response, err := b.httpClient.Post(b.baseURL+"/nonce", "application/json", nil)
 	if err != nil {
-		return nil, fmt.Errorf("cannot fetch lp-signing nonce: %v", err)
+		return nil, fmt.Errorf("cannot fetch lp-signing nonce: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
@@ -390,7 +415,7 @@ func (b *KeypairMgrBackend) getNonce() (*[24]byte, error) {
 	}
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, fmt.Errorf("cannot fetch lp-signing nonce: %v", err)
+		return nil, fmt.Errorf("cannot fetch lp-signing nonce: %w", err)
 	}
 	var nonceResponse lpSigningNonceResponse
 	if err := json.Unmarshal(responseBody, &nonceResponse); err != nil {
